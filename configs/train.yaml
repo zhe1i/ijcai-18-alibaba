@@ -1,0 +1,111 @@
+seed: 2026
+use_cache: true
+
+paths:
+  data_dir: data
+  train_file: round1_ijcai_18_train_20180301.txt
+  test_a_file: round1_ijcai_18_test_a_20180301.txt
+  test_b_file: round1_ijcai_18_test_b_20180418.txt
+  output_dir: outputs
+  cache_dir: outputs/cache
+
+task:
+  label_col: is_trade
+
+time_cv:
+  n_folds: 3
+  val_days: 2
+  random_valid_size: 0.2
+
+features:
+  cvr_group_cols: []
+  freq_cols: []
+  prior_strength: 20.0
+
+drift:
+  zscore_threshold: 1.0
+
+baseline:
+  num_boost_round: 600
+  early_stopping_rounds: 50
+  params:
+    objective: binary
+    metric: binary_logloss
+    learning_rate: 0.05
+    num_leaves: 63
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 1
+    min_data_in_leaf: 30
+    lambda_l2: 1.0
+    verbosity: -1
+
+autoint:
+  use_gpu: true
+  preprocessor:
+    min_freq: 2
+    max_vocab: 300000
+    multi_min_freq: 2
+    multi_max_vocab: 400000
+    max_seq_len: 24
+  model:
+    embed_dim: 16
+    attn_layers: 2
+    num_heads: 4
+    dropout: 0.1
+    shared_hidden: [256, 128]
+    expert_hidden: [64]
+    num_experts: 3
+  train:
+    epochs: 5
+    batch_size: 1024
+    lr: 0.001
+    weight_decay: 0.00001
+    early_stop_patience: 2
+    clip_grad: 5.0
+    loss: weighted_bce
+    pos_weight: 28.0
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+    load_balance_weight: 0.01
+
+predict:
+  batch_size: 2048
+
+evaluation:
+  ece_bins: 10
+
+submission_experiment: autoint_moe_calibrated
+
+experiments:
+  - name: baseline_lgbm
+    model_type: baseline
+    include_match_features: true
+
+  - name: autoint_without_moe
+    model_type: autoint
+    use_multivalue_attention: false
+    use_moe: false
+    use_calibration: false
+    include_match_features: true
+
+  - name: autoint_multivalue_no_moe
+    model_type: autoint
+    use_multivalue_attention: true
+    use_moe: false
+    use_calibration: false
+    include_match_features: true
+
+  - name: autoint_moe_no_calibration
+    model_type: autoint
+    use_multivalue_attention: true
+    use_moe: true
+    use_calibration: false
+    include_match_features: true
+
+  - name: autoint_moe_calibrated
+    model_type: autoint
+    use_multivalue_attention: true
+    use_moe: true
+    use_calibration: true
+    include_match_features: true

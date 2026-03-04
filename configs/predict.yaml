@@ -1,0 +1,17 @@
+seed: 2026
+use_cache: true
+
+paths:
+  data_dir: data
+  train_file: round1_ijcai_18_train_20180301.txt
+  test_a_file: round1_ijcai_18_test_a_20180301.txt
+  test_b_file: round1_ijcai_18_test_b_20180418.txt
+  output_dir: outputs
+  cache_dir: outputs/cache
+
+autoint:
+  use_gpu: true
+
+prediction:
+  experiment_name: autoint_moe_calibrated
+  batch_size: 2048

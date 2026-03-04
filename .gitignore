@@ -1,0 +1,17 @@
+.DS_Store
+
+# Local Python environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Runtime artifacts
+outputs/
+
+# Dataset files (keep data/README.md tracked)
+data/*.txt
+
+# Jupyter
+.ipynb_checkpoints/
+
