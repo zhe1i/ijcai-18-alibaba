@@ -325,6 +325,7 @@ def run_train(config_path: str) -> None:
                 autoint_cfg = config.get("autoint", {})
                 use_moe = bool(exp.get("use_moe", True))
                 use_multivalue = bool(exp.get("use_multivalue_attention", True))
+                use_wide_deep = bool(exp.get("use_wide_deep", False))
                 use_calibration = bool(exp.get("use_calibration", True))
 
                 if train_autoint_fold_fn is None or torch_mod is None:
@@ -344,6 +345,7 @@ def run_train(config_path: str) -> None:
                     device=device,
                     use_moe=use_moe,
                     use_multivalue=use_multivalue,
+                    use_wide_deep=use_wide_deep,
                     use_calibration=use_calibration,
                 )
 
@@ -366,6 +368,7 @@ def run_train(config_path: str) -> None:
                         "include_match_features": include_match,
                         "use_moe": use_moe,
                         "use_multivalue_attention": use_multivalue,
+                        "use_wide_deep": use_wide_deep,
                         "use_calibration": use_calibration,
                         "model_type": "autoint",
                     },
@@ -425,7 +428,7 @@ def run_train(config_path: str) -> None:
         metrics_summary.update(format_metric_summary("oof_after", y_all, after_all))
         metrics_summary["fold_metrics"] = fold_metrics
 
-        rel_fig = exp_dir / "reliability.png"
+        rel_fig = exp_dir / "reliability_diagram.png"
         rel_stats = plot_reliability_diagram(
             y_true=y_all,
             prob_before=before_all,

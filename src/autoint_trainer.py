@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,8 @@ from .autoint_data import AutoIntPreprocessor, CTRTorchDataset
 from .calibration import apply_temperature, fit_temperature_scaling
 from .evaluation import safe_auc, safe_logloss
 from .models.autoint_moe import AutoIntMoEModel, FocalLoss, load_balancing_loss
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -71,6 +74,7 @@ def train_autoint_fold(
     device: torch.device,
     use_moe: bool,
     use_multivalue: bool,
+    use_wide_deep: bool,
     use_calibration: bool,
 ) -> AutoIntFoldResult:
     y_train = pd.to_numeric(train_df[label_col], errors="coerce").fillna(0).to_numpy(dtype=np.float32)
@@ -113,11 +117,16 @@ def train_autoint_fold(
         "shared_hidden": list(model_cfg.get("shared_hidden", [256, 128])),
         "num_experts": int(model_cfg.get("num_experts", 3)),
         "expert_hidden": list(model_cfg.get("expert_hidden", [64])),
+        "dense_tower_hidden": list(model_cfg.get("dense_tower_hidden", [128, 64])),
         "use_moe": bool(use_moe),
         "use_multivalue": bool(use_multivalue),
+        "use_wide_deep": bool(use_wide_deep),
     }
 
     model = AutoIntMoEModel(**model_init_params).to(device)
+    pos_rate_train = float(np.clip(y_train.mean(), 1e-6, 1.0 - 1e-6))
+    prior_logit = float(np.log(pos_rate_train / (1.0 - pos_rate_train)))
+    model.init_output_bias(prior_logit)
 
     lr = float(train_cfg.get("lr", 1e-3))
     weight_decay = float(train_cfg.get("weight_decay", 1e-5))
@@ -129,20 +138,35 @@ def train_autoint_fold(
             alpha=float(train_cfg.get("focal_alpha", 0.25)),
             gamma=float(train_cfg.get("focal_gamma", 2.0)),
         )
+        pos_weight = None
     else:
-        pos_weight = float(train_cfg.get("pos_weight", 20.0))
+        if bool(train_cfg.get("dynamic_pos_weight", True)):
+            pos_count = max(float(y_train.sum()), 1.0)
+            neg_count = max(float(len(y_train) - y_train.sum()), 1.0)
+            pos_weight = neg_count / pos_count
+        else:
+            pos_weight = float(train_cfg.get("pos_weight", 20.0))
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], dtype=torch.float32, device=device))
+    logger.info(
+        "Fold train label stats: pos_rate=%.6f prior_logit=%.6f pos_weight=%s",
+        pos_rate_train,
+        prior_logit,
+        "focal" if pos_weight is None else f"{pos_weight:.6f}",
+    )
 
     max_epochs = int(train_cfg.get("epochs", 5))
     patience = int(train_cfg.get("early_stop_patience", 2))
     clip_grad = float(train_cfg.get("clip_grad", 5.0))
     lb_weight = float(train_cfg.get("load_balance_weight", 0.01)) if use_moe else 0.0
+    wide_l2 = float(train_cfg.get("wide_l2", 0.0)) if use_wide_deep else 0.0
 
     best_metric = float("inf")
     best_state: dict[str, Any] | None = None
     no_improve = 0
+    train_eval_loader = DataLoader(train_ds, batch_size=batch_size * 2, shuffle=False, num_workers=0)
+    pos_rate_valid = float(y_valid.mean()) if len(y_valid) else 0.0
 
-    for _epoch in range(max_epochs):
+    for epoch in range(max_epochs):
         model.train()
         for batch in train_loader:
             batch = _to_device(batch, device)
@@ -152,13 +176,28 @@ def train_autoint_fold(
             loss = criterion(logits, y)
             if use_moe and "gate_weights" in extras and lb_weight > 0:
                 loss = loss + lb_weight * load_balancing_loss(extras["gate_weights"])
+            if wide_l2 > 0:
+                loss = loss + wide_l2 * model.wide_l2_penalty()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
             optimizer.step()
 
+        train_logits, _ = _collect_predictions(model, train_eval_loader, device)
         valid_logits, _ = _collect_predictions(model, valid_loader, device)
+        train_prob = 1.0 / (1.0 + np.exp(-train_logits))
         valid_prob = 1.0 / (1.0 + np.exp(-valid_logits))
         valid_ll = safe_logloss(y_valid, valid_prob)
+        logger.info(
+            "Epoch %d/%d: mean_prob_train=%.6f mean_prob_val=%.6f pos_rate_train=%.6f pos_rate_val=%.6f mean_logit_train=%.6f valid_logloss=%.6f",
+            epoch + 1,
+            max_epochs,
+            float(train_prob.mean()),
+            float(valid_prob.mean()),
+            pos_rate_train,
+            pos_rate_valid,
+            float(train_logits.mean()),
+            valid_ll,
+        )
 
         if valid_ll < best_metric:
             best_metric = valid_ll

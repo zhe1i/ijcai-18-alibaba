@@ -86,19 +86,24 @@ class AutoIntMoEModel(nn.Module):
         shared_hidden: list[int] | None = None,
         num_experts: int = 3,
         expert_hidden: list[int] | None = None,
+        dense_tower_hidden: list[int] | None = None,
         use_moe: bool = True,
         use_multivalue: bool = True,
+        use_wide_deep: bool = False,
     ) -> None:
         super().__init__()
         if shared_hidden is None:
             shared_hidden = [256, 128]
         if expert_hidden is None:
             expert_hidden = [64]
+        if dense_tower_hidden is None:
+            dense_tower_hidden = [128, 64]
 
         self.cat_fields = list(cat_cardinalities.keys())
         self.multi_fields = list(multi_cardinalities.keys())
         self.use_moe = use_moe
         self.use_multivalue = use_multivalue
+        self.use_wide_deep = use_wide_deep
         self.num_experts = num_experts
 
         self.single_embeddings = nn.ModuleDict(
@@ -128,7 +133,11 @@ class AutoIntMoEModel(nn.Module):
             token_count += len(self.multi_fields)
 
         self.flatten_dim = token_count * embed_dim
-        shared_layers = [self.flatten_dim] + shared_hidden
+        dense_tower_out_dim = dense_tower_hidden[-1] if dense_tower_hidden else embed_dim
+        self.dense_tower = MLP(max(num_dense, 1), dense_tower_hidden, dropout=dropout, out_dim=dense_tower_out_dim)
+        self.wide_linear = nn.Linear(max(num_dense, 1), 1) if self.use_wide_deep else None
+        shared_in_dim = self.flatten_dim + (dense_tower_out_dim if self.use_wide_deep else 0)
+        shared_layers = [shared_in_dim] + shared_hidden
         shared_blocks: list[nn.Module] = []
         for i in range(len(shared_layers) - 1):
             shared_blocks.extend(
@@ -148,6 +157,28 @@ class AutoIntMoEModel(nn.Module):
             self.gate = MLP(max(num_gate, 1), [64, 32], dropout=dropout, out_dim=num_experts)
         else:
             self.head = MLP(self.shared_out_dim, expert_hidden, dropout=dropout, out_dim=1)
+
+    @staticmethod
+    def _set_last_linear_bias(module: nn.Module, bias_value: float) -> None:
+        for layer in reversed(list(module.modules())):
+            if isinstance(layer, nn.Linear):
+                nn.init.constant_(layer.bias, bias_value)
+                break
+
+    def init_output_bias(self, prior_logit: float) -> None:
+        if self.use_moe:
+            for expert in self.experts:
+                self._set_last_linear_bias(expert, prior_logit)
+        else:
+            self._set_last_linear_bias(self.head, prior_logit)
+        if self.wide_linear is not None:
+            nn.init.zeros_(self.wide_linear.weight)
+            nn.init.zeros_(self.wide_linear.bias)
+
+    def wide_l2_penalty(self) -> torch.Tensor:
+        if self.wide_linear is None:
+            return torch.tensor(0.0, device=self.dense_proj.weight.device)
+        return torch.sum(self.wide_linear.weight.pow(2))
 
     def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         single_cat = batch["single_cat"]
@@ -186,19 +217,31 @@ class AutoIntMoEModel(nn.Module):
         for layer in self.autoint_layers:
             x = layer(x)
 
-        x = x.reshape(x.shape[0], -1)
-        shared = self.shared_net(x) if len(self.shared_net) > 0 else x
+        x_flat = x.reshape(x.shape[0], -1)
+        if self.use_wide_deep:
+            dense_repr = self.dense_tower(dense_in)
+            deep_in = torch.cat([x_flat, dense_repr], dim=1)
+        else:
+            deep_in = x_flat
+        shared = self.shared_net(deep_in) if len(self.shared_net) > 0 else deep_in
 
         extras: dict[str, torch.Tensor] = {}
         if self.use_moe:
             expert_logits = torch.cat([expert(shared) for expert in self.experts], dim=1)
             gate_logits = self.gate(gate_in)
             gate_weights = torch.softmax(gate_logits, dim=1)
-            logit = (expert_logits * gate_weights).sum(dim=1, keepdim=True)
+            deep_logit = (expert_logits * gate_weights).sum(dim=1, keepdim=True)
             extras["gate_weights"] = gate_weights
             extras["expert_logits"] = expert_logits
         else:
-            logit = self.head(shared)
+            deep_logit = self.head(shared)
+
+        if self.wide_linear is not None:
+            wide_logit = self.wide_linear(dense_in)
+        else:
+            wide_logit = torch.zeros_like(deep_logit)
+
+        logit = deep_logit + wide_logit
 
         return logit.squeeze(1), extras
 

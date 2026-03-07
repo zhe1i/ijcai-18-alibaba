@@ -81,11 +81,60 @@ class AutoIntPreprocessor:
 
         self.single_vocab: dict[str, dict[str, int]] = {}
         self.multi_vocab: dict[str, dict[str, int]] = {}
+        self.dense_rules: list[str] = []
 
         self.dense_mean: np.ndarray | None = None
         self.dense_std: np.ndarray | None = None
         self.gate_mean: np.ndarray | None = None
         self.gate_std: np.ndarray | None = None
+
+    @staticmethod
+    def _dense_rule(col: str) -> str:
+        c = col.lower()
+        if c.startswith("log_freq_"):
+            return "identity"
+        if c.startswith("cvr_"):
+            return "clip01"
+        if c.startswith("is_missing__"):
+            return "binary"
+        if c.startswith("mv_len__"):
+            return "log1p"
+        if c.startswith("match_"):
+            if any(k in c for k in ["jaccard", "cover", "rate", "ratio"]):
+                return "clip01"
+            if "hit_cnt" in c:
+                return "log1p"
+        if c == "shop_review_positive_rate":
+            return "clip01"
+        if c in {"day", "hour", "drift_score"}:
+            return "identity"
+        if any(k in c for k in ["count", "cnt", "freq"]):
+            return "log1p"
+        return "identity"
+
+    def _to_numeric_matrix(self, df: pd.DataFrame, cols: list[str]) -> np.ndarray:
+        if not cols:
+            return np.zeros((len(df), 0), dtype=np.float32)
+        return (
+            df[cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+            .to_numpy(dtype=np.float32)
+        )
+
+    def _apply_dense_rules(self, vals: np.ndarray) -> np.ndarray:
+        if vals.shape[1] == 0:
+            return vals
+        out = vals.copy()
+        for j, rule in enumerate(self.dense_rules):
+            if rule == "log1p":
+                out[:, j] = np.log1p(np.clip(out[:, j], 0.0, None))
+            elif rule == "clip01":
+                out[:, j] = np.clip(out[:, j], 0.0, 1.0)
+            elif rule == "binary":
+                out[:, j] = np.clip(out[:, j], 0.0, 1.0)
+        return out
 
     def fit(self, df: pd.DataFrame) -> None:
         self.single_vocab = {}
@@ -104,15 +153,9 @@ class AutoIntPreprocessor:
                 max_vocab=self.multi_max_vocab,
             )
 
-        dense_vals = (
-            df[self.dense_cols]
-            .apply(pd.to_numeric, errors="coerce")
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0.0)
-            .to_numpy(dtype=np.float32)
-            if self.dense_cols
-            else np.zeros((len(df), 0), dtype=np.float32)
-        )
+        self.dense_rules = [self._dense_rule(c) for c in self.dense_cols]
+        dense_vals = self._to_numeric_matrix(df, self.dense_cols)
+        dense_vals = self._apply_dense_rules(dense_vals)
         self.dense_mean = dense_vals.mean(axis=0) if dense_vals.shape[1] else np.array([], dtype=np.float32)
         self.dense_std = dense_vals.std(axis=0) if dense_vals.shape[1] else np.array([], dtype=np.float32)
         self.dense_std = np.where(self.dense_std < 1e-6, 1.0, self.dense_std)
@@ -163,13 +206,8 @@ class AutoIntPreprocessor:
     def _transform_dense(self, df: pd.DataFrame) -> np.ndarray:
         if not self.dense_cols:
             return np.zeros((len(df), 0), dtype=np.float32)
-        vals = (
-            df[self.dense_cols]
-            .apply(pd.to_numeric, errors="coerce")
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0.0)
-            .to_numpy(dtype=np.float32)
-        )
+        vals = self._to_numeric_matrix(df, self.dense_cols)
+        vals = self._apply_dense_rules(vals)
         return ((vals - self.dense_mean) / self.dense_std).astype(np.float32)
 
     def _transform_gate(self, df: pd.DataFrame) -> np.ndarray:

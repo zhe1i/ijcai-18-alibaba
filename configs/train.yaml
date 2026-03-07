@@ -55,6 +55,7 @@ autoint:
     dropout: 0.1
     shared_hidden: [256, 128]
     expert_hidden: [64]
+    dense_tower_hidden: [128, 64]
     num_experts: 3
   train:
     epochs: 5
@@ -64,10 +65,12 @@ autoint:
     early_stop_patience: 2
     clip_grad: 5.0
     loss: weighted_bce
+    dynamic_pos_weight: true
     pos_weight: 28.0
     focal_alpha: 0.25
     focal_gamma: 2.0
     load_balance_weight: 0.01
+    wide_l2: 0.000001
 
 predict:
   batch_size: 2048
@@ -93,6 +96,7 @@ experiments:
     model_type: autoint
     use_multivalue_attention: true
     use_moe: false
+    use_wide_deep: false
     use_calibration: false
     include_match_features: true
 
@@ -107,5 +111,21 @@ experiments:
     model_type: autoint
     use_multivalue_attention: true
     use_moe: true
+    use_calibration: true
+    include_match_features: true
+
+  - name: autoint_dense_wide_deep_no_moe
+    model_type: autoint
+    use_multivalue_attention: true
+    use_moe: false
+    use_wide_deep: true
+    use_calibration: false
+    include_match_features: true
+
+  - name: autoint_dense_wide_deep_calibrated_no_moe
+    model_type: autoint
+    use_multivalue_attention: true
+    use_moe: false
+    use_wide_deep: true
     use_calibration: true
     include_match_features: true
